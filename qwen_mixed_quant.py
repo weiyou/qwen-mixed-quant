@@ -331,13 +331,15 @@ def variant_e_q6_k_l(path: str, layer, num_layers: int) -> dict | bool:
     Q6_K_L = a Q6_K body (~6.56 bpw) plus token_embd and output/lm_head elevated
     to Q8_0. The "_L" is exactly that embedding/output bump.
 
-    MLX mapping (a faithful, footprint-matching clone, ~6.56 bpw effective):
+    MLX mapping:
     - 8-bit : embed + lm_head + MTP + vision  (the Q8_0 "_L" portion + family I/O)
     - 6-bit : the entire language tower       (the Q6_K body; high_bits == low_bits,
               so the protected bands collapse to the uniform 6-bit floor)
 
-    On Qwen3.5-9B this lands at ~9.5-9.7 GB peak and tracks the real Q6_K_L GGUF
-    in both size and quality (matches the uniform-6 MLX reference).
+    Measured ~7.81 bpw / 8.2 GB on Qwen3.5-9B: on a VLM the 8-bit vision tower and
+    full-size embeddings dominate the average, so this runs heavier than a text-only
+    GGUF Q6_K_L (~6.6 bpw). For a true footprint match use variant E2 (plain uniform
+    6-bit, ~6.50 bpw).
 
     If you instead want a "Q6_K_L+" that elevates the band-critical projections
     (v_proj / down_proj / out_proj) to 8-bit -- the MLX stand-in for Q6_K's
