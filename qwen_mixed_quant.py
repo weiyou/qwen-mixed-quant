@@ -40,8 +40,31 @@ def sanitize_model_name(model: str) -> str:
     return name or "model"
 
 
+def _extract_num_language_layers(cfg: dict) -> int | None:
+    """
+    Extract the number of *language* layers, handling both classic text models
+    and modern Qwen3.5 VLMs / MoE models where the count lives under text_config.
+    """
+    # Classic pure-text models (Qwen3, Qwen2.5, etc.)
+    for key in ("num_hidden_layers", "n_layers", "num_layers"):
+        val = cfg.get(key)
+        if isinstance(val, int) and val > 0:
+            return val
+
+    # Qwen3.5-style VLMs and MoE models: language tower is under text_config
+    for nested_key in ("text_config", "language_config", "llm_config"):
+        nested = cfg.get(nested_key)
+        if isinstance(nested, dict):
+            for key in ("num_hidden_layers", "n_layers", "num_layers"):
+                val = nested.get(key)
+                if isinstance(val, int) and val > 0:
+                    return val
+
+    return None
+
+
 def get_num_layers_from_hf(model: str) -> int | None:
-    """Attempt to read num_hidden_layers from the model's config.json on the Hub."""
+    """Attempt to read the language model layer count from config.json on the Hub."""
     try:
         from huggingface_hub import hf_hub_download
         import json
@@ -54,9 +77,7 @@ def get_num_layers_from_hf(model: str) -> int | None:
         )
         with open(config_path, "r") as f:
             cfg = json.load(f)
-        n = cfg.get("num_hidden_layers") or cfg.get("n_layers") or cfg.get("num_layers")
-        if isinstance(n, int) and n > 0:
-            return n
+        return _extract_num_language_layers(cfg)
     except Exception:
         pass
     return None
@@ -83,11 +104,11 @@ def detect_model_architecture(model: str) -> dict:
         with open(config_path) as f:
             cfg = json.load(f)
 
-        info["num_layers"] = cfg.get("num_hidden_layers") or cfg.get("n_layers")
+        info["num_layers"] = _extract_num_language_layers(cfg)
         info["model_type"] = cfg.get("model_type")
 
         arch = str(cfg.get("architectures", [""])[0]).lower()
-        info["is_vlm"] = "conditional" in arch or "vlm" in arch or info["model_type"] in ("qwen3_5", "qwen3_5_vl")
+        info["is_vlm"] = "conditional" in arch or "vlm" in arch or info["model_type"] in ("qwen3_5", "qwen3_5_vl", "qwen3_5_moe_text")
 
         # Rough heuristics from known Qwen3.5 family behavior
         if info["model_type"] in ("qwen3_5", "qwen3_5_vl") or "3.5" in model.lower():
@@ -355,19 +376,19 @@ def main():
 
     # Rich architecture detection (especially useful for Qwen3.5 VLMs)
     arch_info = detect_model_architecture(args.model)
-    if arch_info["num_layers"]:
-        print(f"[INFO] Detected architecture: {arch_info['model_type'] or 'unknown'} "
-              f"({'VLM' if arch_info['is_vlm'] else 'text-only'})")
+    if arch_info.get("model_type"):
+        vlm_str = "VLM" if arch_info.get("is_vlm") else "text-only"
+        print(f"[INFO] Detected: {arch_info['model_type']} ({vlm_str})")
 
-    # Resolve num_layers
+    # Resolve num_layers with robust nested lookup for Qwen3.5 models
     num_layers = args.num_layers
     if num_layers is None:
-        num_layers = arch_info["num_layers"] or get_num_layers_from_hf(args.model)
+        num_layers = arch_info.get("num_layers") or get_num_layers_from_hf(args.model)
 
     if num_layers is None and variant in ("C", "D"):
         parser.error(
-            "--num-layers is required for variants C and D. "
-            "Qwen3.5-9B uses 32 language layers. Qwen3-32B uses 64."
+            "--num-layers could not be auto-detected. "
+            "Please pass it explicitly (e.g. --num-layers 32 for Qwen3.5-9B or --num-layers 64 for Qwen3-32B)."
         )
     elif num_layers:
         print(f"[INFO] Using {num_layers} language layers")

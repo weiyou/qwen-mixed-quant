@@ -90,7 +90,7 @@ python qwen_mixed_quant.py \
 
 - `--variant`: Quantization strategy (default: D). See recommendations above.
 - `--model`: Hugging Face repo ID or local path (default: Qwen/Qwen3.5-9B). Works great with Qwen3.5-9B, 27B, Qwen3-32B, etc.
-- `--num-layers`: Usually auto-detected. Qwen3.5-9B = 32 language layers. Qwen3-32B = 64.
+- `--num-layers`: Almost always auto-detected now (works for Qwen3.5 VLMs via `text_config`). You only need to pass it for very unusual models.
 - `--trust-remote-code`: Rarely needed for official Qwen models.
 
 The output directory name is derived automatically from the model name and chosen variant.
