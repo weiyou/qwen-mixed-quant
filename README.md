@@ -67,11 +67,13 @@ Test with images or pure text using `mlx_lm` or the `mlx-vlm` package.
 | C       | `MLX-Q4_K6_L`      | 4-bit| 6-bit (linear_attn+down) | 8-bit        | ~5.8 GB                   | Very good / Excellent    | Daily driver, coding, RAG, images   |
 | D       | `MLX-Q5_K6_L`      | 5-bit| 6-bit (linear_attn+down) | 8-bit        | ~6.8 GB                   | **Best practical**       | Long context, reasoning, summarization |
 | E       | `MLX-Q6_K_L`       | 6-bit| none (uniform body)      | 8-bit        | ~6.5 GB (~9.6 GB peak)    | **Q6_K_L-equivalent**    | Matching llama.cpp Q6_K_L 1:1       |
+| E2      | `MLX-Q6_K`         | 6-bit| none (uniform, incl. I/O)| 6-bit        | ~6.3 GB                   | **Q6_K-equivalent**      | Matching plain llama.cpp Q6_K 1:1   |
 
 **Strong recommendation**: start with **Variant D (`MLX-Q5_K6_L`)** — the best practical quality that still leaves comfortable headroom on a 48GB machine. Reach for the others when:
 
 - **C (`MLX-Q4_K6_L`)** — you want maximum speed, or plan to run multiple models / very large batches.
 - **E (`MLX-Q6_K_L`)** — you want 1:1 parity with a llama.cpp `Q6_K_L` build (same footprint and quality).
+- **E2 (`MLX-Q6_K`)** — you want plain uniform 6-bit (the `Q6_K` base, embeddings/output also at 6-bit).
 
 ### Memory and context headroom
 
@@ -104,6 +106,7 @@ For even larger or unusual architectures, copy or subclass `get_qwen_mixed_predi
 | C (`MLX-Q4_K6_L`) | 4-bit bulk + 6-bit on the most important projections in protected layers + 8-bit vision/MTP/embeds. Excellent balance. |
 | D (`MLX-Q5_K6_L`) | Same protection as C but 5-bit bulk. Currently the highest quality recipe that still runs very comfortably on 48GB. |
 | E (`MLX-Q6_K_L`)  | Uniform 6-bit body + 8-bit embeddings/output (+vision/MTP) — the direct analog of llama.cpp's `Q6_K_L`: the 6-bit floor mirrors the Q6_K body, the 8-bit embeddings/output mirror the `_L` Q8_0 bump. ~6.56 bpw effective, footprint-matched to the real GGUF. For a heavier "Q6_K_L+" that also lifts the band-critical projections to 8-bit, set `high_bits=8` in `variant_e_q6_k_l`. |
+| E2 (`MLX-Q6_K`)   | Plain uniform 6-bit on every quantizable layer, embeddings/output included — the analog of plain `Q6_K` (no `_L` bump). Identical to a bare `mlx_lm.convert -q --q-bits 6`. Use when you want the `Q6_K` base rather than the `_L` variant. |
 
 **Protected projections in modern Qwen3.5 models** (in the selected layer bands):
 - Classic: `v_proj`, `down_proj`
@@ -170,6 +173,42 @@ convert(
 # Or build a custom predicate (e.g. protect more layers for a 72B model)
 pred = get_mixed_layer_predicate(num_layers=80, high_bits=6, low_bits=5, group_size=64)
 ```
+
+### Equivalent manual conversions (E and E2 without this tool)
+
+The two 6-bit variants are simple enough to reproduce with `mlx_lm` directly.
+
+**E2 (`MLX-Q6_K`)** is plain uniform 6-bit, so the bare CLI is all you need:
+
+```bash
+mlx_lm.convert \
+  --hf-path "Qwen/Qwen3.5-9B" \
+  --mlx-path "./mlx_models/Qwen3.5-9B-MLX-Q6_K" \
+  -q --q-bits 6 --q-group-size 64
+```
+
+**E (`MLX-Q6_K_L`)** adds the Q8_0 `_L` bump on embeddings/output (+MTP/vision), which the `mlx_lm.convert` CLI can't express — so it needs a predicate:
+
+```python
+from mlx_lm import convert
+
+def q6_k_l(path, layer):
+    if not hasattr(layer, "to_quantized"):
+        return False
+    hi = ("embed_tokens" in path or path.endswith("lm_head.weight")
+          or ".mtp." in path or path.startswith("mtp.")
+          or "visual." in path or ".visual." in path)
+    return {"bits": 8 if hi else 6, "group_size": 64}
+
+convert(
+    hf_path="Qwen/Qwen3.5-9B",
+    mlx_path="./mlx_models/Qwen3.5-9B-MLX-Q6_K_L",
+    quantize=True,
+    quant_predicate=q6_k_l,
+)
+```
+
+Both are produced directly by `--variant E2` / `--variant E` in this tool.
 
 ## How the Modern Predicate Works
 

@@ -356,6 +356,22 @@ def variant_e_q6_k_l(path: str, layer, num_layers: int) -> dict | bool:
     return pred(path, layer)
 
 
+def variant_e2_q6_k(path: str, layer) -> dict | bool:
+    """
+    Plain uniform 6-bit — the analog of llama.cpp's Q6_K (no "_L" embedding bump).
+
+    Every quantizable layer (including embeddings, lm_head, MTP and the vision
+    tower) is quantized at 6-bit. This is exactly equivalent to running
+    `mlx_lm.convert -q --q-bits 6 --q-group-size 64` with the default predicate.
+
+    Use --variant E (MLX-Q6_K_L) instead when you want the I/O tensors
+    (embeddings / output / MTP / vision) kept at 8-bit.
+    """
+    if hasattr(layer, "to_quantized"):
+        return {"bits": 6, "group_size": 64}
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -369,7 +385,8 @@ def main():
             "  B  MLX-mixed-4-6  upstream mlx-lm baseline (outside the naming scheme).\n"
             "  C  MLX-Q4_K6_L  4-bit bulk + 6-bit protected projections + 8-bit embed/vision [good default]\n"
             "  D  MLX-Q5_K6_L  5-bit bulk + 6-bit protected projections + 8-bit embed/vision [best quality on 48GB]\n"
-            "  E  MLX-Q6_K_L   6-bit bulk + 8-bit embed/output (+vision/MTP). Direct analog of llama.cpp Q6_K_L.\n\n"
+            "  E  MLX-Q6_K_L   6-bit bulk + 8-bit embed/output (+vision/MTP). Direct analog of llama.cpp Q6_K_L.\n"
+            "  E2 MLX-Q6_K     plain uniform 6-bit everywhere. Analog of llama.cpp Q6_K (no _L bump).\n\n"
             "Naming: Q<body> = bulk bit-width; _K<n> = MLX group-quant with protected projections at <n>-bit\n"
             "(omitted when the protected tier collapses to the body); _L = 8-bit ('large') embeddings/output.\n\n"
             "Qwen3.5-9B (your primary model) is a VLM with linear_attn + MTP + visual tower.\n"
@@ -379,7 +396,7 @@ def main():
     )
     parser.add_argument(
         "--variant",
-        choices=["A", "B", "C", "D", "E"],
+        choices=["A", "B", "C", "D", "E", "E2"],
         default="D",
         help="Quantization variant (default: D = highest fidelity)",
     )
@@ -449,10 +466,15 @@ def main():
         name = f"{short_name}-MLX-Q5_K6_L"
         desc = "Variant D (MLX-Q5_K6_L): 5-bit bulk + 6-bit protected projections + 8-bit embed/vision/MTP (best quality on 48GB Mac)"
 
-    else:  # E
+    elif variant == "E":
         predicate = lambda p, l: variant_e_q6_k_l(p, l, num_layers=num_layers)
         name = f"{short_name}-MLX-Q6_K_L"
         desc = "Variant E (MLX-Q6_K_L): 6-bit bulk + 8-bit embed/output (+vision/MTP) — direct analog of llama.cpp Q6_K_L"
+
+    else:  # E2
+        predicate = variant_e2_q6_k
+        name = f"{short_name}-MLX-Q6_K"
+        desc = "Variant E2 (MLX-Q6_K): plain uniform 6-bit everywhere — analog of llama.cpp Q6_K (no _L bump)"
 
     out_path = Path(args.output_dir) / name
     out_path.parent.mkdir(parents=True, exist_ok=True)
