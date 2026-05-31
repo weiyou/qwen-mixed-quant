@@ -29,37 +29,81 @@ The techniques here will become even more valuable as models scale to 70B–200B
 ```bash
 pip install mlx-lm huggingface_hub
 
-# Best quality option for 48GB machines (recommended)
+# Best quality option for 48GB machines (recommended) -> MLX-Q5_K6_L
 python qwen_mixed_quant.py --variant D --model Qwen/Qwen3.5-9B
 
-# Fast but still very good
+# Fast but still very good -> MLX-Q4_K6_L
 python qwen_mixed_quant.py --variant C --model Qwen/Qwen3.5-9B
+
+# Direct analog of llama.cpp Q6_K_L (6-bit body + 8-bit embeds/output) -> MLX-Q6_K_L
+python qwen_mixed_quant.py --variant E --model Qwen/Qwen3.5-9B
 ```
 
-The output directory names are now descriptive (e.g. `Qwen3.5-9B-MLX-5bit-vlm-high-fidelity`).
+Output directory names follow a **GGUF-parallel naming convention** (e.g. `Qwen3.5-9B-MLX-Q6_K_L`).
+
+### Naming convention
+
+The MLX suffix mirrors llama.cpp's `Q<bits>_K_<S|M|L>` GGUF tags:
+
+```
+MLX-Q<body>_K[<protect>]_<embed>
+       │        │          └─ embeddings/output (+vision/MTP): L = 8-bit ("large")
+       │        └─ protected-projection tier (v/down/out_proj in bands), in bits;
+       │           omitted when it collapses to the body (uniform body)
+       └─ bulk/body bit-width (the dominant tier)
+_K = MLX group-wise quantization (the analog of GGUF K-quant superblocks)
+```
+
+So **`MLX-Q6_K_L`** = 6-bit body + 8-bit embeddings/output — the direct analog of GGUF **`Q6_K_L`**.
+`MLX-Q5_K6_L` = 5-bit body with a 6-bit protected-projection tier and 8-bit embeddings (no plain GGUF equivalent — this mid-tier protection is MLX-specific).
 
 Test with images or pure text using `mlx_lm` or the `mlx-vlm` package.
 
 ## Recommended Variants for M4 Pro / Max 48GB
 
-| Variant | Output suffix (example)              | Bulk | Protected bands          | Vision / MTP | Approx. size (Qwen3.5-9B) | Quality on 48GB          | Best for on M4 Pro                  |
-|---------|--------------------------------------|------|--------------------------|--------------|---------------------------|--------------------------|-------------------------------------|
-| A       | 4bit-8bit-vision                     | 4-bit| 8-bit I/O only           | 8-bit        | ~5.2 GB                   | Good                     | Fast chat, high throughput          |
-| C       | 4bit-vlm-balanced                    | 4-bit| 6-bit (linear_attn+down) | 8-bit        | ~5.8 GB                   | Very good / Excellent    | Daily driver, coding, RAG, images   |
-| D       | 5bit-vlm-high-fidelity               | 5-bit| 6-bit (linear_attn+down) | 8-bit        | ~6.8 GB                   | **Best practical**       | Long context, reasoning, summarization |
+| Variant | Output suffix      | Bulk | Protected bands          | Vision / MTP | Approx. size (Qwen3.5-9B) | Quality on 48GB          | Best for on M4 Pro                  |
+|---------|--------------------|------|--------------------------|--------------|---------------------------|--------------------------|-------------------------------------|
+| A       | `MLX-Q4_K_L`       | 4-bit| none (8-bit I/O only)    | 8-bit        | ~5.2 GB                   | Good                     | Fast chat, high throughput          |
+| C       | `MLX-Q4_K6_L`      | 4-bit| 6-bit (linear_attn+down) | 8-bit        | ~5.8 GB                   | Very good / Excellent    | Daily driver, coding, RAG, images   |
+| D       | `MLX-Q5_K6_L`      | 5-bit| 6-bit (linear_attn+down) | 8-bit        | ~6.8 GB                   | **Best practical**       | Long context, reasoning, summarization |
+| E       | `MLX-Q6_K_L`       | 6-bit| none (uniform body)      | 8-bit        | ~6.5 GB (~9.6 GB peak)    | **Q6_K_L-equivalent**    | Matching llama.cpp Q6_K_L 1:1       |
 
-**Strong recommendation for 48GB machines**: Start with **Variant D**. On an M4 Pro 48GB you will still have plenty of headroom for 32k–128k context + vision encoding.
+**Strong recommendation**: start with **Variant D (`MLX-Q5_K6_L`)** — the best practical quality that still leaves comfortable headroom on a 48GB machine. Reach for the others when:
 
-Variant C is the better choice if you want maximum speed or plan to run multiple models / very large batches.
+- **C (`MLX-Q4_K6_L`)** — you want maximum speed, or plan to run multiple models / very large batches.
+- **E (`MLX-Q6_K_L`)** — you want 1:1 parity with a llama.cpp `Q6_K_L` build (same footprint and quality).
 
-## The Four Variants (Technical)
+### Memory and context headroom
+
+Qwen3.5-9B at Variant D uses **~6.5–7.5 GB** for weights, leaving an M4 Pro 48GB plenty of room for:
+
+- 64k–128k context (with KV cache)
+- Vision encoding
+- Running alongside other tools / browsers
+
+For even larger context, enable MLX KV-cache quantization at run time (see mlx-lm docs).
+
+### Scaling to larger Qwen3.5 models
+
+The script auto-detects vision / MTP / linear-attention characteristics, so the same variants apply to bigger models:
+
+| Model | Suggested variant | Notes |
+|---|---|---|
+| `Qwen/Qwen3.5-9B` | D | 32k–128k context + images, excellent quality |
+| `Qwen/Qwen3.5-27B` | C or D | ~16k–32k context (aggressive 4/5-bit + 8-bit vision) |
+| `Qwen/Qwen3.5-35B-A3B` (MoE) | D | very promising — low active parameter count |
+
+For even larger or unusual architectures, copy or subclass `get_qwen_mixed_predicate` and customize the protection rules.
+
+## The Variants (Technical)
 
 | Variant | Key behavior for Qwen3.5 VLMs |
 |---------|-------------------------------|
 | A       | Pure speed. 4-bit everywhere except critical I/O and vision tower kept at 8-bit. |
 | B       | Uses mlx-lm's built-in `mixed_4_6` string recipe (good baseline, less tuned for linear_attn + MTP). |
-| C       | 4-bit bulk + 6-bit on the most important projections in protected layers + 8-bit vision/MTP/embeds. Excellent balance. |
-| D       | Same protection as C but 5-bit bulk. Currently the highest quality recipe that still runs very comfortably on 48GB. |
+| C (`MLX-Q4_K6_L`) | 4-bit bulk + 6-bit on the most important projections in protected layers + 8-bit vision/MTP/embeds. Excellent balance. |
+| D (`MLX-Q5_K6_L`) | Same protection as C but 5-bit bulk. Currently the highest quality recipe that still runs very comfortably on 48GB. |
+| E (`MLX-Q6_K_L`)  | Uniform 6-bit body + 8-bit embeddings/output (+vision/MTP) — the direct analog of llama.cpp's `Q6_K_L`: the 6-bit floor mirrors the Q6_K body, the 8-bit embeddings/output mirror the `_L` Q8_0 bump. ~6.56 bpw effective, footprint-matched to the real GGUF. For a heavier "Q6_K_L+" that also lifts the band-critical projections to 8-bit, set `high_bits=8` in `variant_e_q6_k_l`. |
 
 **Protected projections in modern Qwen3.5 models** (in the selected layer bands):
 - Classic: `v_proj`, `down_proj`
@@ -81,7 +125,7 @@ The script itself has no additional dependencies beyond `mlx-lm`.
 
 ```
 python qwen_mixed_quant.py \
-  --variant {A,B,C,D} \
+  --variant {A,B,C,D,E} \
   --model MODEL_ID_OR_PATH \
   --output-dir ./mlx_models \
   --num-layers N \
@@ -94,22 +138,6 @@ python qwen_mixed_quant.py \
 - `--trust-remote-code`: Rarely needed for official Qwen models.
 
 The output directory name is derived automatically from the model name and chosen variant.
-
-## Using on M4 Pro 48GB (Practical Guidance)
-
-Qwen3.5-9B quantized with Variant D typically uses **~6.5–7.5 GB** for the weights. This leaves very comfortable headroom on a 48GB M4 Pro for:
-
-- 64k–128k context (with KV cache)
-- Vision encoding
-- Running alongside other tools / browsers
-
-**Typical comfortable setups on 48GB:**
-
-- `Qwen3.5-9B` (Variant D) → 32k–128k context, images, excellent quality
-- `Qwen3.5-27B` (Variant C or D, aggressive) → possible with 16k–32k context
-- `Qwen3.5-35B-A3B` MoE (Variant D) → very promising because of low active parameters
-
-For even larger context on 48GB, consider also enabling MLX KV cache quantization when running (see mlx-lm docs).
 
 ## Programmatic Use
 
@@ -134,7 +162,7 @@ from qwen_mixed_quant import variant_d_high_fidelity, get_mixed_layer_predicate
 from mlx_lm import convert
 convert(
     hf_path="Qwen/Qwen3-32B",
-    mlx_path="./Qwen3-32B-MLX-5bit-mixed",
+    mlx_path="./Qwen3-32B-MLX-Q5_K6_L",
     quantize=True,
     quant_predicate=lambda p, l: variant_d_high_fidelity(p, l, num_layers=64),
 )
@@ -156,18 +184,6 @@ It understands the full modern Qwen3.5 family structure:
 - Applies the proven early/late/periodic band heuristic only to the language tower
 
 This makes the tool dramatically more effective for the actual Qwen3.5-9B, 27B, and MoE models people want to run on Apple Silicon today.
-
-## Adapting for Larger Qwen3.5 Models on 48GB
-
-This repo is now optimized for exactly the models that fit well on M4 Pro 48GB:
-
-- `Qwen/Qwen3.5-9B` → Variant D (excellent)
-- `Qwen/Qwen3.5-27B` → Variant C or D (aggressive 4/5-bit with 8-bit vision)
-- `Qwen/Qwen3.5-35B-A3B` (MoE) → Very interesting target — low active parameter count
-
-For these models the script now auto-detects many characteristics and the predicate makes the right decisions for vision + MTP + linear attention.
-
-For even larger or very different architectures you can still subclass or copy `get_qwen_mixed_predicate` and customize the protection rules.
 
 ## Evaluating Quantized Models
 

@@ -10,7 +10,8 @@ Specially tuned for Qwen3.5 VLMs (including Qwen3.5-9B) with support for:
 
 Optimized for Apple Silicon, especially M4 Pro / Max / Ultra machines with 48GB+ unified memory.
 
-Variants C and D are the recommended choices for excellent quality at 4-bit / 5-bit footprints.
+Variants C and D are the recommended choices for excellent quality at 4-bit / 5-bit footprints;
+variant E (MLX-Q6_K_L) is a direct analog of llama.cpp's Q6_K_L 6-bit quant.
 
 Usage:
     python qwen_mixed_quant.py --variant D --model Qwen/Qwen3.5-9B
@@ -323,6 +324,38 @@ def variant_d_high_fidelity(path: str, layer, num_layers: int) -> dict | bool:
     return pred(path, layer)
 
 
+def variant_e_q6_k_l(path: str, layer, num_layers: int) -> dict | bool:
+    """
+    Direct MLX analog of llama.cpp's Q6_K_L quant.
+
+    Q6_K_L = a Q6_K body (~6.56 bpw) plus token_embd and output/lm_head elevated
+    to Q8_0. The "_L" is exactly that embedding/output bump.
+
+    MLX mapping (a faithful, footprint-matching clone, ~6.56 bpw effective):
+    - 8-bit : embed + lm_head + MTP + vision  (the Q8_0 "_L" portion + family I/O)
+    - 6-bit : the entire language tower       (the Q6_K body; high_bits == low_bits,
+              so the protected bands collapse to the uniform 6-bit floor)
+
+    On Qwen3.5-9B this lands at ~9.5-9.7 GB peak and tracks the real Q6_K_L GGUF
+    in both size and quality (matches the uniform-6 MLX reference).
+
+    If you instead want a "Q6_K_L+" that elevates the band-critical projections
+    (v_proj / down_proj / out_proj) to 8-bit -- the MLX stand-in for Q6_K's
+    importance-weighted superblocks -- set high_bits=8 (costs ~1.5-2 GB more).
+    """
+    pred = get_qwen_mixed_predicate(
+        num_layers=num_layers,
+        high_bits=6,   # == low_bits: uniform 6-bit body, the true Q6_K_L analog
+        low_bits=6,    # 6-bit body == Q6_K
+        embed_bits=8,  # Q8_0 embeddings + output == the "_L"
+        vision_bits=8,
+        protect_mtp=True,
+        mtp_bits=8,
+        group_size=64,
+    )
+    return pred(path, layer)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -331,19 +364,22 @@ def main():
     parser = argparse.ArgumentParser(
         description="Create high-quality mixed-precision quantized MLX models from Qwen3 / Qwen3.5 / Qwen3.6 checkpoints.",
         epilog=(
-            "Variants (recommended for M4 Pro 48GB Mac Mini):\n"
-            "  A  Fastest (4-bit bulk + 8-bit I/O + vision). Use when latency matters most.\n"
-            "  B  Official mlx-lm mixed_4_6 (good baseline).\n"
-            "  C  Excellent balance for Qwen3.5 VLMs (4-bit + 6-bit protected + 8-bit vision/I/O) [good default]\n"
-            "  D  Highest fidelity on 48GB (5-bit bulk + 6-bit protected + 8-bit vision/I/O) [recommended for quality]\n\n"
+            "Variants (output dirs follow a GGUF-parallel MLX-Q<body>_K<protect>_<embed> naming scheme):\n"
+            "  A  MLX-Q4_K_L   4-bit bulk + 8-bit embed/I/O + vision, no protected tier. Fastest.\n"
+            "  B  MLX-mixed-4-6  upstream mlx-lm baseline (outside the naming scheme).\n"
+            "  C  MLX-Q4_K6_L  4-bit bulk + 6-bit protected projections + 8-bit embed/vision [good default]\n"
+            "  D  MLX-Q5_K6_L  5-bit bulk + 6-bit protected projections + 8-bit embed/vision [best quality on 48GB]\n"
+            "  E  MLX-Q6_K_L   6-bit bulk + 8-bit embed/output (+vision/MTP). Direct analog of llama.cpp Q6_K_L.\n\n"
+            "Naming: Q<body> = bulk bit-width; _K<n> = MLX group-quant with protected projections at <n>-bit\n"
+            "(omitted when the protected tier collapses to the body); _L = 8-bit ('large') embeddings/output.\n\n"
             "Qwen3.5-9B (your primary model) is a VLM with linear_attn + MTP + visual tower.\n"
-            "Variants C and D are now tuned specifically for these models."
+            "Variants C, D and E are tuned specifically for these models."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--variant",
-        choices=["A", "B", "C", "D"],
+        choices=["A", "B", "C", "D", "E"],
         default="D",
         help="Quantization variant (default: D = highest fidelity)",
     )
@@ -385,7 +421,7 @@ def main():
     if num_layers is None:
         num_layers = arch_info.get("num_layers") or get_num_layers_from_hf(args.model)
 
-    if num_layers is None and variant in ("C", "D"):
+    if num_layers is None and variant in ("C", "D", "E"):
         parser.error(
             "--num-layers could not be auto-detected. "
             "Please pass it explicitly (e.g. --num-layers 32 for Qwen3.5-9B or --num-layers 64 for Qwen3-32B)."
@@ -395,23 +431,28 @@ def main():
 
     if variant == "A":
         predicate = variant_a_fastest
-        name = f"{short_name}-MLX-4bit-8bit-vision"
-        desc = "Variant A: 4-bit bulk + 8-bit I/O + vision (fastest practical for VLMs)"
+        name = f"{short_name}-MLX-Q4_K_L"
+        desc = "Variant A (MLX-Q4_K_L): 4-bit bulk + 8-bit embed/I/O + vision, no protected projection tier (fastest)"
 
     elif variant == "B":
         predicate = variant_b_official_mixed()
         name = f"{short_name}-MLX-mixed-4-6"
-        desc = "Variant B: Official mlx-lm mixed_4_6 recipe"
+        desc = "Variant B (MLX-mixed-4-6): upstream mlx-lm mixed_4_6 baseline (outside the MLX-Q*_K_* convention)"
 
     elif variant == "C":
         predicate = lambda p, l: variant_c_good_quality(p, l, num_layers=num_layers)
-        name = f"{short_name}-MLX-4bit-vlm-balanced"
-        desc = "Variant C: 4-bit bulk + 6-bit protected (linear_attn+down) + 8-bit vision/I/O/MTP [great on 48GB]"
+        name = f"{short_name}-MLX-Q4_K6_L"
+        desc = "Variant C (MLX-Q4_K6_L): 4-bit bulk + 6-bit protected projections (linear_attn+down) + 8-bit embed/vision/MTP [great on 48GB]"
 
-    else:  # D
+    elif variant == "D":
         predicate = lambda p, l: variant_d_high_fidelity(p, l, num_layers=num_layers)
-        name = f"{short_name}-MLX-5bit-vlm-high-fidelity"
-        desc = "Variant D: 5-bit bulk + 6-bit protected + 8-bit vision/I/O/MTP (best quality on 48GB Mac)"
+        name = f"{short_name}-MLX-Q5_K6_L"
+        desc = "Variant D (MLX-Q5_K6_L): 5-bit bulk + 6-bit protected projections + 8-bit embed/vision/MTP (best quality on 48GB Mac)"
+
+    else:  # E
+        predicate = lambda p, l: variant_e_q6_k_l(p, l, num_layers=num_layers)
+        name = f"{short_name}-MLX-Q6_K_L"
+        desc = "Variant E (MLX-Q6_K_L): 6-bit bulk + 8-bit embed/output (+vision/MTP) — direct analog of llama.cpp Q6_K_L"
 
     out_path = Path(args.output_dir) / name
     out_path.parent.mkdir(parents=True, exist_ok=True)
