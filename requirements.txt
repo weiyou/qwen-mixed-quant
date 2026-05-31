@@ -1,0 +1,5 @@
+# Core dependency for MLX quantization on Apple Silicon
+mlx-lm>=0.21.0
+
+# Optional: faster / more robust model downloads from Hugging Face
+huggingface-hub[cli]>=0.23.0
