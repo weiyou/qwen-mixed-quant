@@ -37,6 +37,9 @@ python qwen_mixed_quant.py --variant C --model Qwen/Qwen3.5-9B
 
 # Direct analog of llama.cpp Q6_K_L (6-bit body + 8-bit embeds/output) -> MLX-Q6_K_L
 python qwen_mixed_quant.py --variant E --model Qwen/Qwen3.5-9B
+
+# Plain uniform 6-bit, analog of llama.cpp Q6_K; best 6-bit choice for text -> MLX-Q6_K
+python qwen_mixed_quant.py --variant E2 --model Qwen/Qwen3.5-9B
 ```
 
 Output directory names follow a **GGUF-parallel naming convention** (e.g. `Qwen3.5-9B-MLX-Q6_K_L`).
@@ -66,14 +69,16 @@ Test with images or pure text using `mlx_lm` or the `mlx-vlm` package.
 | A       | `MLX-Q4_K_L`       | 4-bit| none (8-bit I/O only)    | 8-bit        | ~5.2 GB                   | Good                     | Fast chat, high throughput          |
 | C       | `MLX-Q4_K6_L`      | 4-bit| 6-bit (linear_attn+down) | 8-bit        | ~5.8 GB                   | Very good / Excellent    | Daily driver, coding, RAG, images   |
 | D       | `MLX-Q5_K6_L`      | 5-bit| 6-bit (linear_attn+down) | 8-bit        | ~6.8 GB                   | **Best practical**       | Long context, reasoning, summarization |
-| E       | `MLX-Q6_K_L`       | 6-bit| none (uniform body)      | 8-bit        | ~6.5 GB (~9.6 GB peak)    | **Q6_K_L-equivalent**    | Matching llama.cpp Q6_K_L 1:1       |
-| E2      | `MLX-Q6_K`         | 6-bit| none (uniform, incl. I/O)| 6-bit        | ~6.3 GB                   | **Q6_K-equivalent**      | Matching plain llama.cpp Q6_K 1:1   |
+| E       | `MLX-Q6_K_L`       | 6-bit| none (uniform body)      | 8-bit        | ~8.2 GB (7.81 bpw)        | Highest                  | Image/VLM inputs (8-bit vision tower)         |
+| E2      | `MLX-Q6_K`         | 6-bit| none (uniform, incl. I/O)| 6-bit        | ~6.8 GB (6.50 bpw)        | **Q6_K-equivalent**      | Text/agent work; closest GGUF Q6_K(_L) footprint |
 
 **Strong recommendation**: start with **Variant D (`MLX-Q5_K6_L`)** — the best practical quality that still leaves comfortable headroom on a 48GB machine. Reach for the others when:
 
 - **C (`MLX-Q4_K6_L`)** — you want maximum speed, or plan to run multiple models / very large batches.
-- **E (`MLX-Q6_K_L`)** — you want 1:1 parity with a llama.cpp `Q6_K_L` build (same footprint and quality).
-- **E2 (`MLX-Q6_K`)** — you want plain uniform 6-bit (the `Q6_K` base, embeddings/output also at 6-bit).
+- **E (`MLX-Q6_K_L`)** — the structural Q6_K_L analog: 6-bit body with 8-bit embeddings/output (and, since this is a VLM, 8-bit vision/MTP). Measures **~7.81 bpw / 8.2 GB** here — heavier than a text-only GGUF `Q6_K_L` because the 8-bit vision tower and full-size embeddings dominate the average.
+- **E2 (`MLX-Q6_K`)** — plain uniform 6-bit (the `Q6_K` base, embeddings/output included). At **~6.50 bpw / 6.8 GB** it is actually the closest footprint match to a real GGUF `Q6_K` / `Q6_K_L`.
+
+> **E vs E2 for text:** in side-by-side summarization tests (two transcripts, multiple seeds) E and E2 came out quality-equivalent. E's extra ~1.3 bpw is entirely the 8-bit vision tower, so it only earns its larger footprint on image inputs — for text/agent workloads, prefer **E2** (faster and ~1.5 GB lighter).
 
 ### Memory and context headroom
 
@@ -101,11 +106,11 @@ For even larger or unusual architectures, copy or subclass `get_qwen_mixed_predi
 
 | Variant | Key behavior for Qwen3.5 VLMs |
 |---------|-------------------------------|
-| A       | Pure speed. 4-bit everywhere except critical I/O and vision tower kept at 8-bit. |
-| B       | Uses mlx-lm's built-in `mixed_4_6` string recipe (good baseline, less tuned for linear_attn + MTP). |
+| A (`MLX-Q4_K_L`)  | Pure speed. 4-bit everywhere except critical I/O and vision tower kept at 8-bit. |
+| B (`MLX-mixed-4-6`) | Uses mlx-lm's built-in `mixed_4_6` string recipe (good baseline, less tuned for linear_attn + MTP). |
 | C (`MLX-Q4_K6_L`) | 4-bit bulk + 6-bit on the most important projections in protected layers + 8-bit vision/MTP/embeds. Excellent balance. |
 | D (`MLX-Q5_K6_L`) | Same protection as C but 5-bit bulk. Currently the highest quality recipe that still runs very comfortably on 48GB. |
-| E (`MLX-Q6_K_L`)  | Uniform 6-bit body + 8-bit embeddings/output (+vision/MTP) — the direct analog of llama.cpp's `Q6_K_L`: the 6-bit floor mirrors the Q6_K body, the 8-bit embeddings/output mirror the `_L` Q8_0 bump. ~6.56 bpw effective, footprint-matched to the real GGUF. For a heavier "Q6_K_L+" that also lifts the band-critical projections to 8-bit, set `high_bits=8` in `variant_e_q6_k_l`. |
+| E (`MLX-Q6_K_L`)  | Uniform 6-bit body + 8-bit embeddings/output (and, on this VLM, 8-bit vision/MTP) — the structural analog of llama.cpp's `Q6_K_L`: the 6-bit floor mirrors the Q6_K body, the 8-bit embeddings/output mirror the `_L` Q8_0 bump. **Measured ~7.81 bpw / 8.2 GB on Qwen3.5-9B** — the 8-bit vision tower and full-size embeddings dominate the average, so it runs heavier than a text-only GGUF `Q6_K_L` (≈6.6 bpw). For a true footprint match use **E2** (`MLX-Q6_K`, ~6.50 bpw). To go heavier still and also lift the band-critical projections to 8-bit, set `high_bits=8` in `variant_e_q6_k_l`. |
 | E2 (`MLX-Q6_K`)   | Plain uniform 6-bit on every quantizable layer, embeddings/output included — the analog of plain `Q6_K` (no `_L` bump). Identical to a bare `mlx_lm.convert -q --q-bits 6`. Use when you want the `Q6_K` base rather than the `_L` variant. |
 
 **Protected projections in modern Qwen3.5 models** (in the selected layer bands):
@@ -128,7 +133,7 @@ The script itself has no additional dependencies beyond `mlx-lm`.
 
 ```
 python qwen_mixed_quant.py \
-  --variant {A,B,C,D,E} \
+  --variant {A,B,C,D,E,E2} \
   --model MODEL_ID_OR_PATH \
   --output-dir ./mlx_models \
   --num-layers N \
@@ -144,7 +149,7 @@ The output directory name is derived automatically from the model name and chose
 
 ## Programmatic Use
 
-All variants (including the new `get_qwen_mixed_predicate`) are simple callables compatible with `mlx_lm.convert(..., quant_predicate=...)`.
+All variants are simple callables compatible with `mlx_lm.convert(..., quant_predicate=...)`. The core predicate is `get_qwen_mixed_predicate`.
 
 ```python
 from qwen_mixed_quant import get_qwen_mixed_predicate
@@ -212,7 +217,7 @@ Both are produced directly by `--variant E2` / `--variant E` in this tool.
 
 ## How the Modern Predicate Works
 
-The primary function is now `get_qwen_mixed_predicate` (the old one still exists for compatibility).
+The primary function is `get_qwen_mixed_predicate` (the legacy `get_mixed_layer_predicate` still exists for compatibility).
 
 It understands the full modern Qwen3.5 family structure:
 
@@ -243,8 +248,9 @@ Compare against:
 ## Project Structure
 
 ```
-qwen_mixed_quant.py   # All variants + CLI
-README.md             # This file
+qwen_mixed_quant.py             # All variants + CLI
+archive/qwen_mixed_quant_v0.py  # Legacy pre-VLM-aware version (kept for reproducibility)
+README.md                       # This file
 ```
 
 The entire quantization strategy lives in one well-commented file so it is easy to audit, modify, and vendor into larger pipelines.
