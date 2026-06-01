@@ -64,19 +64,24 @@ Test with images or pure text using `mlx_lm` or the `mlx-vlm` package.
 
 ## Recommended Variants for M4 Pro / Max 48GB
 
-| Variant | Output suffix      | Bulk | Protected bands          | Vision / MTP | Approx. size (Qwen3.5-9B) | Quality on 48GB          | Best for on M4 Pro                  |
-|---------|--------------------|------|--------------------------|--------------|---------------------------|--------------------------|-------------------------------------|
-| A       | `MLX-Q4_K_L`       | 4-bit| none (8-bit I/O only)    | 8-bit        | ~5.2 GB                   | Good                     | Fast chat, high throughput          |
-| C       | `MLX-Q4_K6_L`      | 4-bit| 6-bit (linear_attn+down) | 8-bit        | ~5.8 GB                   | Very good / Excellent    | Daily driver, coding, RAG, images   |
-| D       | `MLX-Q5_K6_L`      | 5-bit| 6-bit (linear_attn+down) | 8-bit        | ~6.8 GB                   | **Best practical**       | Long context, reasoning, summarization |
-| E       | `MLX-Q6_K_L`       | 6-bit| none (uniform body)      | 8-bit        | ~8.2 GB (7.81 bpw)        | Highest                  | Image/VLM inputs (8-bit vision tower)         |
-| E2      | `MLX-Q6_K`         | 6-bit| none (uniform, incl. I/O)| 6-bit        | ~6.8 GB (6.50 bpw)        | **Q6_K-equivalent**      | Text/agent work; closest GGUF Q6_K(_L) footprint |
+| Variant | Output suffix        | Bulk | Protected bands                        | Vision / MTP | Approx. size (Qwen3.5-9B) | Quality on 48GB          | Best for on M4 Pro                  |
+|---------|----------------------|------|----------------------------------------|--------------|---------------------------|--------------------------|-------------------------------------|
+| A       | `MLX-Q4_K_L`         | 4-bit| none (8-bit I/O only)                  | 8-bit        | ~5.2 GB                   | Good                     | Fast chat, high throughput          |
+| B       | `MLX-mixed-4-6`      | 4-bit| 6-bit (classic `v_proj` + `down_proj` only) | 4-bit        | ~5.3 GB                   | Fair                     | Quick upstream baseline / comparison point |
+| C       | `MLX-Q4_K6_L`        | 4-bit| 6-bit (linear_attn + down + v_proj)    | 8-bit        | ~5.8 GB                   | Very good / Excellent    | Daily driver, coding, RAG, images   |
+| D       | `MLX-Q5_K6_L`        | 5-bit| 6-bit (linear_attn + down + v_proj)    | 8-bit        | ~6.8 GB                   | **Best practical**       | Long context, reasoning, summarization |
+| E       | `MLX-Q6_K_L`         | 6-bit| none (uniform body)                    | 8-bit        | ~8.2 GB (7.81 bpw)        | Highest                  | Image/VLM inputs (8-bit vision tower)         |
+| E2      | `MLX-Q6_K`           | 6-bit| none (uniform, incl. I/O)              | 6-bit        | ~6.8 GB (6.50 bpw)        | **Q6_K-equivalent**      | Text/agent work; closest GGUF Q6_K(_L) footprint |
+
+**Note on Variant B (`MLX-mixed-4-6`)**: This is just a thin wrapper around mlx-lm's built-in `mixed_4_6` recipe. It is included for completeness and easy comparison, but it is **not tuned for Qwen3.5 models**. It only knows about classic `v_proj`/`down_proj` (it completely misses the important `linear_attn.*` projections), does not protect `embed_tokens`, and will aggressively 4-bit quantize the vision tower and MTP heads on VLMs. For Qwen3.5-9B (and similar modern Qwen models) we strongly recommend the custom variants (especially **C** or **D**) instead.
 
 **Strong recommendation**: start with **Variant D (`MLX-Q5_K6_L`)** — the best practical quality that still leaves comfortable headroom on a 48GB machine. Reach for the others when:
 
+- **A (`MLX-Q4_K_L`)** — you want the absolute smallest/fastest footprint and are okay with only protecting embeddings + lm_head at 8-bit.
 - **C (`MLX-Q4_K6_L`)** — you want maximum speed, or plan to run multiple models / very large batches.
 - **E (`MLX-Q6_K_L`)** — the structural Q6_K_L analog: 6-bit body with 8-bit embeddings/output (and, since this is a VLM, 8-bit vision/MTP). Measures **~7.81 bpw / 8.2 GB** here — heavier than a text-only GGUF `Q6_K_L` because the 8-bit vision tower and full-size embeddings dominate the average.
 - **E2 (`MLX-Q6_K`)** — plain uniform 6-bit (the `Q6_K` base, embeddings/output included). At **~6.50 bpw / 6.8 GB** it is actually the closest footprint match to a real GGUF `Q6_K` / `Q6_K_L`.
+- **B (`MLX-mixed-4-6`)** — you specifically want to compare against the exact upstream mlx-lm `mixed_4_6` baseline (generally not recommended for Qwen3.5 models — see note above).
 
 > **E vs E2 for text:** in side-by-side summarization tests (two transcripts, multiple seeds) E and E2 came out quality-equivalent. E's extra ~1.3 bpw is entirely the 8-bit vision tower, so it only earns its larger footprint on image inputs — for text/agent workloads, prefer **E2** (faster and ~1.5 GB lighter).
 
@@ -107,7 +112,7 @@ For even larger or unusual architectures, copy or subclass `get_qwen_mixed_predi
 | Variant | Key behavior for Qwen3.5 VLMs |
 |---------|-------------------------------|
 | A (`MLX-Q4_K_L`)  | Pure speed. 4-bit everywhere except critical I/O and vision tower kept at 8-bit. |
-| B (`MLX-mixed-4-6`) | Uses mlx-lm's built-in `mixed_4_6` string recipe (good baseline, less tuned for linear_attn + MTP). |
+| B (`MLX-mixed-4-6`) | Upstream mlx-lm `mixed_4_6` baseline. Only protects classic `v_proj` + `down_proj` (misses Qwen3.5 `linear_attn` projections entirely) and does not protect `embed_tokens`. Useful as a reference point but not recommended for Qwen3.5. |
 | C (`MLX-Q4_K6_L`) | 4-bit bulk + 6-bit on the most important projections in protected layers + 8-bit vision/MTP/embeds. Excellent balance. |
 | D (`MLX-Q5_K6_L`) | Same protection as C but 5-bit bulk. Currently the highest quality recipe that still runs very comfortably on 48GB. |
 | E (`MLX-Q6_K_L`)  | Uniform 6-bit body + 8-bit embeddings/output (and, on this VLM, 8-bit vision/MTP) — the structural analog of llama.cpp's `Q6_K_L`: the 6-bit floor mirrors the Q6_K body, the 8-bit embeddings/output mirror the `_L` Q8_0 bump. **Measured ~7.81 bpw / 8.2 GB on Qwen3.5-9B** — the 8-bit vision tower and full-size embeddings dominate the average, so it runs heavier than a text-only GGUF `Q6_K_L` (≈6.6 bpw). For a true footprint match use **E2** (`MLX-Q6_K`, ~6.50 bpw). To go heavier still and also lift the band-critical projections to 8-bit, set `high_bits=8` in `variant_e_q6_k_l`. |
@@ -200,9 +205,11 @@ from mlx_lm import convert
 def q6_k_l(path, layer):
     if not hasattr(layer, "to_quantized"):
         return False
-    hi = ("embed_tokens" in path or path.endswith("lm_head.weight")
-          or ".mtp." in path or path.startswith("mtp.")
-          or "visual." in path or ".visual." in path)
+    # Robust check: mlx passes module paths ("lm_head", "model.embed_tokens", etc.)
+    p = path.lower()
+    hi = ("embed_tokens" in p or "lm_head" in p
+          or ".mtp." in p or p.startswith("mtp.")
+          or "visual." in p or ".visual." in p)
     return {"bits": 8 if hi else 6, "group_size": 64}
 
 convert(
@@ -245,10 +252,20 @@ Compare against:
 - The unquantized BF16 reference (if you have the VRAM)
 - The official `mlx-lm` 4-bit or `mixed_4_6` baseline
 
+A dedicated audit tool is included:
+
+```bash
+# After any conversion, run the verifier
+python verify_quant.py ./mlx_models/Qwen3.5-9B-MLX-Q5_K6_L --detailed
+```
+
+It checks the quantization map, confirms embed/lm_head/MTP/vision treatment, guesses the variant, and (when MLX is available) inspects actual dtypes on disk.
+
 ## Project Structure
 
 ```
 qwen_mixed_quant.py             # All variants + CLI
+verify_quant.py                 # Post-conversion audit / recipe verifier
 archive/qwen_mixed_quant_v0.py  # Legacy pre-VLM-aware version (kept for reproducibility)
 README.md                       # This file
 ```

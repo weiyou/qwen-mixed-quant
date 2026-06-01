@@ -151,17 +151,19 @@ def is_vision_path(path: str) -> bool:
 
 def is_mtp_path(path: str) -> bool:
     """Return True for Multi-Token Prediction head weights."""
-    return path.startswith("mtp.") or ".mtp." in path
+    p = path.lower()
+    return p.startswith("mtp.") or ".mtp." in p
 
 
 def is_embed_or_head(path: str) -> bool:
-    """True for embedding and language modeling head weights (including nested)."""
-    return (
-        "embed_tokens" in path
-        or path == "lm_head.weight"
-        or path.endswith("lm_head.weight")
-        or ("language_model" in path and "embed_tokens" in path)
-    )
+    """True for embedding and language modeling head weights (including nested).
+
+    Uses substring checks because mlx_lm / mlx.nn.quantize passes module paths
+    (e.g. "lm_head", "language_model.lm_head", "model.embed_tokens") rather than
+    full weight paths like "lm_head.weight".
+    """
+    p = path.lower()
+    return "embed_tokens" in p or "lm_head" in p
 
 
 def get_qwen_mixed_predicate(
@@ -392,7 +394,8 @@ def main():
             "Naming: Q<body> = bulk bit-width; _K<n> = MLX group-quant with protected projections at <n>-bit\n"
             "(omitted when the protected tier collapses to the body); _L = 8-bit ('large') embeddings/output.\n\n"
             "Qwen3.5-9B (your primary model) is a VLM with linear_attn + MTP + visual tower.\n"
-            "Variants C, D and E are tuned specifically for these models."
+            "Variants C, D and E (plus A) are tuned specifically for these models.\n"
+            "Variant B is just a thin wrapper over the upstream mlx-lm mixed_4_6 recipe and is included mainly for comparison."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
